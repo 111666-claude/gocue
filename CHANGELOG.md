@@ -4,6 +4,22 @@ All notable changes to gocue are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and gocue uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `gocue playlist file...` plans an ordered playlist on one timeline. It
+  analyses each file with the existing single-file cue and loudness math and
+  emits per-track timeline positions, overlaps, gains and ducked handover
+  bounds as JSON. Gains and overlaps are capped by a true-peak ceiling
+  (`--peak_ceiling`, default −1 dBFS) and an overlap loudness budget
+  (`--overlap_lufs`, defaulting to `--target`); short tracks and long intros
+  never produce a negative overlap. Failed files, duplicates (by resolved
+  path), an empty list and timeouts are reported in the plan with context
+  instead of aborting it. Single-file output is unchanged.
+- A `TimeoutError` type for probe and scan deadlines. Its message is unchanged;
+  playlist planning uses it to report a timed-out file as such.
+
 ## [1.3.0] - 2026-10-13
 
 gocue no longer starts `ffmpeg` or `ffprobe`. It reads tags and measures

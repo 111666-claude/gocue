@@ -38,7 +38,7 @@ func openInput(path string, timeout time.Duration) (*C.gocue_input, error) {
 
 func avError(code C.int, timeout time.Duration) error {
 	if code == C.AVERROR_EXIT {
-		return fmt.Errorf("timed out after %s", timeout)
+		return TimeoutError{After: timeout}
 	}
 	buf := make([]byte, C.AV_ERROR_MAX_STRING_SIZE)
 	C.av_strerror(code, (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))

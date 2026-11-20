@@ -28,12 +28,21 @@ type options struct {
 	printFlags  bool
 	blankskip   float64
 	execTimeout time.Duration
+	// playlist-only limits
+	peakCeiling   float64
+	overlapTarget float64
 }
 
 // newRootCmd builds a fresh root command with its own isolated options.
 func newRootCmd() *cobra.Command {
 	o := &options{}
+	cmd := newFileCmd(o)
+	cmd.AddCommand(newPlaylistCmd())
+	return cmd
+}
 
+// newFileCmd builds the single-file command with its own isolated options.
+func newFileCmd(o *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "gocue [file]",
 		Short: "Analyse audio file for cue-in, cue-out, overlay and EBU R128 loudness data",
@@ -101,27 +110,10 @@ func (o *options) run(cmd *cobra.Command, file string) error {
 	}
 
 	if o.printFlags {
-		// Keep stdout reserved for machine-readable JSON (Liquidsoap pipes).
-		errOut := cmd.ErrOrStderr()
-		cmd.Flags().VisitAll(func(f *pflag.Flag) {
-			// Diagnostics only; a failed write to stderr must not affect the run.
-			_, _ = fmt.Fprintf(errOut, "Flag: %s, Value: %v\n", f.Name, f.Value)
-		})
+		o.logFlags(cmd)
 	}
 
-	calc := cue.NewCalculator(&cue.CalculatorOptions{
-		ExecutionTimeout: o.execTimeout,
-		TargetLoudness:   o.target,
-		Silence:          o.silence,
-		Overlay:          o.overlay,
-		LongtailSeconds:  o.longtail,
-		Extra:            o.extra,
-		Drop:             o.drop,
-		NoClip:           o.noclip,
-		BlankSkip:        o.blankskip,
-	})
-
-	res, err := calc.Calc(file)
+	res, err := o.calculator().Calc(file)
 	if err != nil {
 		return fmt.Errorf("error while calculating cue/loudness parameters: %w", err)
 	}
@@ -140,6 +132,30 @@ func (o *options) run(cmd *cobra.Command, file string) error {
 		return fmt.Errorf("error while writing the result: %w", err)
 	}
 	return nil
+}
+
+// logFlags dumps every flag to stderr so stdout stays machine-readable.
+func (o *options) logFlags(cmd *cobra.Command) {
+	errOut := cmd.ErrOrStderr()
+	cmd.Flags().VisitAll(func(f *pflag.Flag) {
+		// Diagnostics only; a failed write to stderr must not affect the run.
+		_, _ = fmt.Fprintf(errOut, "Flag: %s, Value: %v\n", f.Name, f.Value)
+	})
+}
+
+// calculator builds a calculator from the analysis flags.
+func (o *options) calculator() *cue.Calculator {
+	return cue.NewCalculator(&cue.CalculatorOptions{
+		ExecutionTimeout: o.execTimeout,
+		TargetLoudness:   o.target,
+		Silence:          o.silence,
+		Overlay:          o.overlay,
+		LongtailSeconds:  o.longtail,
+		Extra:            o.extra,
+		Drop:             o.drop,
+		NoClip:           o.noclip,
+		BlankSkip:        o.blankskip,
+	})
 }
 
 // validateRanges validates that numeric parameters are within their allowed ranges
@@ -164,6 +180,94 @@ func (o *options) validateRanges() error {
 	}
 	if o.blankskip < 0.0 || o.blankskip > 60.0 {
 		return fmt.Errorf("blankskip must be between 0.0 and 60.0, got %f", o.blankskip)
+	}
+	return nil
+}
+
+// newPlaylistCmd builds the playlist planning command. It runs on its own
+// options struct so the analysis flags and the plan limits stay per-invocation.
+func newPlaylistCmd() *cobra.Command {
+	o := &options{}
+	cmd := &cobra.Command{
+		Use:   "playlist [file...]",
+		Short: "Plan an ordered playlist's cue points, overlaps and gains as a JSON timeline",
+		Long: `Analyse each file in order with the single-file cue/loudness math and lay the
+tracks out on one timeline. Each handover overlaps the outgoing and incoming
+track, ducking both when needed so the overlap stays within the loudness budget
+and the peak ceiling. Tracks whose gain would push the true peak past the
+ceiling are capped and reported, as are files that cannot be analysed.
+
+The plan is printed as one line of JSON on stdout; diagnostics go to stderr.`,
+		Args:    cobra.ArbitraryArgs,
+		Version: version,
+		// Report an empty list in the plan JSON; only flag errors are fatal.
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return o.runPlaylist(cmd, args)
+		},
+	}
+
+	cmd.Flags().Float64VarP(&o.target, "target", "t", -18.0, "LUFS reference target; -23.0 to 0.0")
+	cmd.Flags().DurationVarP(&o.execTimeout, "exec_timeout", "e", 20*time.Second, "Script execution timeout per file")
+	cmd.Flags().Float64VarP(&o.silence, "silence", "s", -42.0, "LU below integrated track loudness for cue-in & cue-out points")
+	cmd.Flags().Float64VarP(&o.overlay, "overlay", "o", -8.0, "LU below integrated track loudness to trigger next track")
+	cmd.Flags().Float64VarP(&o.longtail, "longtail", "l", 15.0, "Overlay duration (s) that triggers long-tail recalculation (0–60)")
+	cmd.Flags().Float64VarP(&o.extra, "extra", "x", -12.0, "Extra LU below overlay for songs with long tail")
+	cmd.Flags().Float64VarP(&o.drop, "drop", "d", 40.0, "Max. percent loudness drop at the end still considered a sustained ending")
+	cmd.Flags().BoolVarP(&o.nice, "nice", "n", false, "Pretty-print JSON output")
+	cmd.Flags().Float64VarP(&o.blankskip, "blankskip", "b", 0.0, "Skip blank (silence) within track if longer than [BLANKSKIP] seconds")
+	cmd.Flags().BoolVarP(&o.printFlags, "print_flags", "p", false, "Log all flags")
+	cmd.Flags().Float64Var(&o.peakCeiling, "peak_ceiling", -1.0, "Highest true peak a planned track or overlap may reach, dBFS")
+	cmd.Flags().Float64Var(&o.overlapTarget, "overlap_lufs", -18.0, "Loudness budget for the region where two tracks play together, LUFS")
+
+	return cmd
+}
+
+// runPlaylist validates the flags, analyses the files in order and prints the
+// plan.
+func (o *options) runPlaylist(cmd *cobra.Command, files []string) error {
+	if err := o.validateRanges(); err != nil {
+		return err
+	}
+	if o.peakCeiling > 0.0 {
+		return fmt.Errorf("peak_ceiling must be at most 0.0 dBFS, got %f", o.peakCeiling)
+	}
+	// The overlap budget follows the loudness target unless it was set on its
+	// own, so changing only --target does not leave the mix at the old level.
+	if !cmd.Flags().Changed("overlap_lufs") {
+		o.overlapTarget = o.target
+	}
+	if o.overlapTarget < -23.0 || o.overlapTarget > 0.0 {
+		return fmt.Errorf("overlap_lufs must be between -23.0 and 0.0, got %f", o.overlapTarget)
+	}
+
+	if o.printFlags {
+		o.logFlags(cmd)
+	}
+
+	planner := cue.NewPlaylistPlanner(o.calculator(), &cue.PlaylistOptions{
+		PeakCeilingDBFS:     o.peakCeiling,
+		OverlapLoudnessLUFS: o.overlapTarget,
+	})
+	plan := planner.Plan(files)
+
+	var jsonData []byte
+	var err error
+	if o.nice {
+		jsonData, err = plan.MarshalNiceJSON()
+	} else {
+		jsonData, err = plan.MarshalJSON()
+	}
+	if err != nil {
+		return fmt.Errorf("error while marshalling the plan: %w", err)
+	}
+
+	if _, err := fmt.Fprintln(cmd.OutOrStdout(), string(jsonData)); err != nil {
+		return fmt.Errorf("error while writing the plan: %w", err)
+	}
+	for _, issue := range plan.Errors {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s: %s\n", issue.Reason, issue.Message)
 	}
 	return nil
 }

@@ -62,6 +62,9 @@ This links whatever FFmpeg `pkg-config` finds, so build the static one first and
 
 # Custom loudness target (-16 LUFS instead of -18)
 ./gocue -t -16 audio_file.wav
+
+# Plan an ordered playlist on one timeline
+./gocue playlist track1.flac track2.flac track3.flac
 ```
 
 ## Usage
@@ -81,6 +84,13 @@ This links whatever FFmpeg `pkg-config` finds, so build the static one first and
 | `--blankskip` | `-b` | `0.0` | Early cue-out on in-track silence longer than this many seconds (`0` = off) |
 | `--exec_timeout` | `-e` | `20s` | Timeout for the tag probe and the loudness scan |
 | `--print_flags` | `-p` | `false` | Log flag values to **stderr** (stdout stays JSON-only) |
+
+`gocue playlist` accepts the analysis flags above except `--noclip` (the plan always caps gain at `--peak_ceiling`), plus:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--peak_ceiling` | `-1.0` | Highest true peak a planned track or overlap may reach, dBFS (≤ 0) |
+| `--overlap_lufs` | `--target` | Loudness budget for the region where two tracks play together, LUFS (−23.0 to 0.0) |
 
 ### Parameter ranges
 
@@ -199,6 +209,54 @@ Use `--blankskip` for “hidden track” gaps. It is **off by default** (`0.0`) 
 ./gocue -b 0 audio_file.mp3     # explicit disable (same as default)
 ./gocue -b 10 audio_file.mp3    # require longer silence
 ```
+
+## Playlist handover plan
+
+A single track's cue points can be right while the joined programme still
+steps in level. `gocue playlist` analyses each file in order with exactly the
+same cue and loudness math as the single-file command, then lays the tracks out
+on one timeline and emits a JSON plan:
+
+```bash
+./gocue playlist track1.flac track2.flac track3.flac
+```
+
+For each track the plan gives the timeline position (`start`, `end`, seconds
+from the start of the programme), the original cue points (`cue_in`, `cue_out`,
+`duration`), the overlap with its neighbours (`overlap_in`, `overlap_out`), and
+the gain to apply (`gain`). Each `handovers` entry says where the incoming
+track starts (`at`), how long the two overlap (`duration`), and how much both
+must be ducked (`duck`) so the overlap stays inside its limits. Loudness and
+gain fields carry the same unit suffixes as the single-file output; timeline
+fields are plain JSON numbers.
+
+How a handover is built:
+
+1. The overlap is the outgoing track's cue-out minus its own next-track overlay
+   point (`liq_cross_start_next`). It is clamped to zero and to the playable
+   length of both tracks, and never runs into the outgoing track's own incoming
+   overlap, so three tracks never play at once. A short track or a long intro
+   therefore gives a short overlap, never a negative one.
+2. Each track's gain is `--target` minus its measured loudness, capped so the
+   track's true peak stays at or below `--peak_ceiling` (default −1 dBFS). A
+   track the ceiling keeps below target is marked `target_reached: false` and
+   reported in `warnings` with the shortfall.
+3. Both tracks are ducked during the overlap so the combined loudness (the
+   uncorrelated power sum) fits `--overlap_lufs` and the combined true peak (the
+   coherent sum) fits `--peak_ceiling`. The plan shows those bounds, never the
+   pre-duck values.
+
+Failures do not abort the plan. A file that cannot be analysed, a duplicate of
+an earlier entry (compared by absolute, symlink-resolved path), or an empty
+list appears in `errors` with an `index`, `path`, machine-readable `reason` and
+a message; the remaining tracks still form a valid timeline. `reason` is one of
+`empty_playlist`, `duplicate`, `timeout`, `bad_media` or `invalid_analysis`.
+The command exits successfully whenever it can print a plan; only invalid flags
+are fatal.
+
+`--exec_timeout` applies per file, so a long playlist does not share a single
+deadline. The command analyses files one after another; gocue's cached-tag path
+makes an already-tagged playlist fast.
 
 ## Liquidsoap protocol
 

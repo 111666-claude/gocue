@@ -172,6 +172,7 @@ all three green.
 | [pkg/cue/libav.go](pkg/cue/libav.go), [libav.c](pkg/cue/libav.c) | cgo layer: reads durations and tags as ffprobe would, and runs ebur128 as the ffmpeg CLI did, with each channel's true peak on its own thread |
 | [scripts/build-ffmpeg.sh](scripts/build-ffmpeg.sh) | Pinned, checksummed static FFmpeg 9.0.1 build used by `make ffmpeg`, CI and the example image |
 | [pkg/cue/scan.go](pkg/cue/scan.go) | Full ebur128 scan and all cue/overlay math |
+| [pkg/cue/playlist.go](pkg/cue/playlist.go) | `playlist` subcommand: per-track gain, overlap clamping, ducked handover bounds, error reporting |
 | [pkg/cue/result.go](pkg/cue/result.go) | Numeric `Result`, unit suffixes applied only at marshal time |
 | [pkg/cue/frame.go](pkg/cue/frame.go) | One ebur128 frame (PTS + momentary loudness) |
 | [pkg/cue/error.go](pkg/cue/error.go) | `ErrRequireAnalysis`, the "cache is unusable" signal |
